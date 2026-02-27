@@ -1,111 +1,276 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "⚡ 잡은 상대 킥그랩",
+    Icon = 0,
+    LoadingTitle = "Target Kick Grab",
+    LoadingSubtitle = "ON/OFF 가능",
+    ConfigurationSaving = { Enabled = false }
+})
+
 -- =============================================
--- [ 킥그랩 메인 루프 (30/30 도배) ]
+-- [ 서비스 로드 ]
 -- =============================================
-local function ExecuteKickGrabLoop()
-    local lastStrikeTime = tick() 
-    local lastSpawnTime = 0 
-    local currentPalletRef = nil
-    local isPalletOwned = false
-    local currentTargetIndex = 1
-    local frameCount = 0
-    local setOwnerCount = 0
-    local destroyCount = 0
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local plr = Players.LocalPlayer
+local rs = ReplicatedStorage
 
-    while KickGrabState.Looping do
-        if #kickGrabTargetList == 0 then
-            break
-        end
-        
-        if currentTargetIndex > #kickGrabTargetList then
-            currentTargetIndex = 1
-            frameCount = frameCount + 1
-            
-            -- 1초마다 통계 표시 (60프레임 기준)
-            if frameCount % 60 == 0 then
-                print(string.format("SetOwner: %d, Destroy: %d", setOwnerCount, destroyCount))
-                setOwnerCount = 0
-                destroyCount = 0
-            end
-        end
-        
-        local targetName = kickGrabTargetList[currentTargetIndex]
-        local target = Players:FindFirstChild(targetName)
-        
-        if not target then
-            currentTargetIndex = currentTargetIndex + 1
-            task.wait()
-            continue
-        end
-        
-        local myChar = plr.Character
-        local targetChar = target.Character
-        local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        
-        local targetHrp = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-        local targetBody = targetChar and (targetChar:FindFirstChild("Torso") or targetChar:FindFirstChild("UpperTorso"))
-        local cam = Workspace.CurrentCamera 
+-- 리모트 이벤트
+local GrabEvents = rs:FindFirstChild("GrabEvents")
+local SetNetworkOwner = GrabEvents and (GrabEvents:FindFirstChild("SetNetworkOwner") or GrabEvents:FindFirstChild("SetOwner"))
+local DestroyGrabLine = GrabEvents and (GrabEvents:FindFirstChild("DestroyGrabLine") or GrabEvents:FindFirstChild("DestroyLine"))
 
-        if myHrp and targetHrp and cam then
-            local rOwner = SetNetworkOwner
-            local rDestroy = DestroyGrabLine
-            local rSpawn = SpawnToyRemote
-            
-            local distance = (myHrp.Position - targetHrp.Position).Magnitude
-            if distance > 30 then
-                local ping = plr:GetNetworkPing()
-                local offset = targetHrp.Position + (targetHrp.Velocity * (ping + 0.15))
-                myHrp.CFrame = CFrame.new(offset) * targetHrp.CFrame.Rotation
-                task.wait(0.05)
-            end
-            
-            local detentionPos
-            if KickGrabState.Mode == "위" then 
-                detentionPos = myHrp.CFrame * CFrame.new(0, 18, 0)
-            elseif KickGrabState.Mode == "아래" then 
-                detentionPos = myHrp.CFrame * CFrame.new(0, -10, 0)
-            else 
-                detentionPos = cam.CFrame * CFrame.new(0, 0, -KickGrabState.DetentionDist)
-            end
-            
-            -- ===== 30/30 도배 파트 =====
-            if rOwner and rDestroy then
-                -- SetOwner 30번
-                for i = 1, 30 do
-                    pcall(function()
-                        rOwner:FireServer(targetHrp, detentionPos)
-                        if targetBody then
-                            rOwner:FireServer(targetBody, detentionPos)
+-- =============================================
+-- [ 변수 ]
+-- =============================================
+local kickActive = false
+local kickThread = nil
+local currentTarget = nil
+local setOwnerCount = 0
+local destroyCount = 0
+
+-- =============================================
+-- [ 현재 잡고 있는 상대 찾기 ]
+-- =============================================
+local function getGrabbedTarget()
+    local myChar = plr.Character
+    if not myChar then return nil end
+    
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+    
+    local grabParts = workspace:FindFirstChild("GrabParts")
+    if not grabParts then return nil end
+    
+    for _, grabPart in ipairs(grabParts:GetChildren()) do
+        if grabPart.Name == "GrabPart" then
+            local weld = grabPart:FindFirstChildOfClass("WeldConstraint")
+            if weld and weld.Part1 then
+                local targetPart = weld.Part1
+                -- 이 파트가 어떤 플레이어의 것인지 확인
+                for _, player in ipairs(Players:GetPlayers()) do
+                    if player ~= plr and player.Character then
+                        if targetPart:IsDescendantOf(player.Character) then
+                            return player
                         end
-                    end)
-                    setOwnerCount = setOwnerCount + 1
-                end
-                
-                -- 위치 고정
-                targetHrp.CFrame = detentionPos
-                targetHrp.AssemblyLinearVelocity = Vector3.zero
-                if targetBody then
-                    targetBody.CFrame = detentionPos
-                    targetBody.AssemblyLinearVelocity = Vector3.zero
-                end
-                
-                -- Destroy 30번
-                for i = 1, 30 do
-                    pcall(function()
-                        rDestroy:FireServer(targetHrp)
-                        if targetBody then
-                            rDestroy:FireServer(targetBody)
-                        end
-                    end)
-                    destroyCount = destroyCount + 1
+                    end
                 end
             end
+        end
+    end
+    
+    return nil
+end
 
-            if KickGrabState.AutoRagdoll then
-                local pallet = GetPallet()
-                if not pallet and (tick() - lastSpawnTime > 3.0) then
-                    lastSpawnTime = tick()
-                    if rSpawn then 
-                        task.spawn(function() 
+-- =============================================
+-- [ 킥그랩 실행 함수 (30/30 도배) ]
+-- =============================================
+local function startKickGrab()
+    local target = getGrabbedTarget()
+    
+    if not target then
+        Rayfield:Notify({
+            Title = "❌ 오류",
+            Content = "잡고 있는 상대가 없음",
+            Duration = 2
+        })
+        return false
+    end
+    
+    currentTarget = target
+    kickActive = true
+    
+    Rayfield:Notify({
+        Title = "🚀 킥그랩 시작",
+        Content = "대상: " .. target.Name,
+        Duration = 2
+    })
+    
+    kickThread = task.spawn(function()
+        while kickActive do
+            -- 매 루프마다 현재 타겟 확인 (죽거나 사라지면 중지)
+            if not currentTarget or not currentTarget.Character then
+                break
+            end
+            
+            local targetChar = currentTarget.Character
+            local targetHrp = targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("Torso")
+            local targetBody = targetChar:FindFirstChild("Torso") or targetChar:FindFirstChild("UpperTorso")
+            local myChar = plr.Character
+            
+            if targetHrp and myChar and SetNetworkOwner and DestroyGrabLine then
+                local myHrp = myChar:FindFirstChild("HumanoidRootPart")
+                local cam = workspace.CurrentCamera
+                
+                if myHrp and cam then
+                    -- 감금 위치 (카메라 앞)
+                    local detentionPos = cam.CFrame * CFrame.new(0, 0, -19)
+                    
+                    -- ===== 30/30 도배 =====
+                    -- SetOwner 30번
+                    for i = 1, 30 do
+                        pcall(function()
+                            SetNetworkOwner:FireServer(targetHrp, detentionPos)
+                            if targetBody then
+                                SetNetworkOwner:FireServer(targetBody, detentionPos)
+                            end
+                        end)
+                        setOwnerCount = setOwnerCount + 1
+                    end
+                    
+                    -- 위치 고정
+                    targetHrp.CFrame = detentionPos
+                    targetHrp.AssemblyLinearVelocity = Vector3.zero
+                    if targetBody then
+                        targetBody.CFrame = detentionPos
+                        targetBody.AssemblyLinearVelocity = Vector3.zero
+                    end
+                    
+                    -- Destroy 30번
+                    for i = 1, 30 do
+                        pcall(function()
+                            DestroyGrabLine:FireServer(targetHrp)
+                            if targetBody then
+                                DestroyGrabLine:FireServer(targetBody)
+                            end
+                        end)
+                        destroyCount = destroyCount + 1
+                    end
+                end
+            end
+            
+            RunService.RenderStepped:Wait()
+        end
+        
+        -- 루프 종료 시 자동으로 상태 정리
+        if kickActive then
+            kickActive = false
+            Rayfield:Notify({
+                Title = "🛑 킥그랩 종료",
+                Content = "대상 사라짐",
+                Duration = 2
+            })
+        end
+    end)
+    
+    return true
+end
+
+-- =============================================
+-- [ 킥그랩 중지 함수 ]
+-- =============================================
+local function stopKickGrab()
+    if kickActive then
+        kickActive = false
+        if kickThread then
+            task.cancel(kickThread)
+            kickThread = nil
+        end
+        Rayfield:Notify({
+            Title = "🛑 킥그랩 중지",
+            Content = string.format("SetOwner: %d | Destroy: %d", setOwnerCount, destroyCount),
+            Duration = 2
+        })
+    else
+        Rayfield:Notify({
+            Title = "⚠️ 알림",
+            Content = "실행 중이 아님",
+            Duration = 1
+        })
+    end
+end
+
+-- =============================================
+-- [ 현재 잡은 상대 표시 ]
+-- =============================================
+local function updateCurrentTarget()
+    local target = getGrabbedTarget()
+    if target then
+        return "🎯 " .. target.Name .. " (" .. target.DisplayName .. ")"
+    else
+        return "❌ 잡은 상대 없음"
+    end
+end
+
+-- =============================================
+-- [ UI ]
+-- =============================================
+local MainTab = Window:CreateTab("킥그랩", 4483362458)
+
+-- ========== 현재 상태 ==========
+MainTab:CreateSection("🎯 현재 상태")
+
+local TargetLabel = MainTab:CreateLabel("잡은 상대 없음", 4483362458)
+
+-- 0.5초마다 잡은 상대 업데이트
+spawn(function()
+    while task.wait(0.5) do
+        TargetLabel:Set(updateCurrentTarget())
+    end
+end)
+
+-- ========== 실행 버튼 ==========
+MainTab:CreateSection("🎮 제어")
+
+local ToggleButton = MainTab:CreateToggle({
+    Name = "⚡ 킥그랩 실행",
+    CurrentValue = false,
+    Callback = function(Value)
+        if Value then
+            local success = startKickGrab()
+            if not success then
+                ToggleButton:Set(false)
+            end
+        else
+            stopKickGrab()
+        end
+    end
+})
+
+MainTab:CreateButton({
+    Name = "⏹️ 강제 중지",
+    Callback = function()
+        stopKickGrab()
+        ToggleButton:Set(false)
+    end
+})
+
+-- ========== 상태 표시 ==========
+MainTab:CreateSection("📊 통계")
+
+local StatusLabel = MainTab:CreateLabel("대기 중...", 4483362458)
+local CountLabel = MainTab:CreateLabel("SetOwner: 0 | Destroy: 0", 4483362458)
+
+spawn(function()
+    while task.wait(0.2) do
+        if kickActive and currentTarget then
+            StatusLabel:Set("🟢 " .. currentTarget.Name .. " 공격 중")
+        else
+            StatusLabel:Set("⚫ 대기 중")
+        end
+        CountLabel:Set(string.format("SetOwner: %d | Destroy: %d", setOwnerCount, destroyCount))
+    end
+end)
+
+-- =============================================
+-- [ AFK 방지 ]
+-- =============================================
+local vu = game:GetService("VirtualUser")
+plr.Idled:Connect(function()
+    vu:CaptureController()
+    vu:ClickButton2(Vector2.new())
+end)
+
+-- =============================================
+-- [ 시작 알림 ]
+-- =============================================
+Rayfield:Notify({
+    Title = "🚀 잡은 상대 킥그랩",
+    Content = "상대 잡고 토글 ON!",
+    Duration = 3
+})                        task.spawn(function() 
                             rSpawn:InvokeServer("PalletLightBrown") 
                         end) 
                     end
