@@ -1,0 +1,143 @@
+-- =============================================
+-- [ 킥그랩 메인 루프 (30/30 도배) ]
+-- =============================================
+local function ExecuteKickGrabLoop()
+    local lastStrikeTime = tick() 
+    local lastSpawnTime = 0 
+    local currentPalletRef = nil
+    local isPalletOwned = false
+    local currentTargetIndex = 1
+    local frameCount = 0
+    local setOwnerCount = 0
+    local destroyCount = 0
+
+    while KickGrabState.Looping do
+        if #kickGrabTargetList == 0 then
+            break
+        end
+        
+        if currentTargetIndex > #kickGrabTargetList then
+            currentTargetIndex = 1
+            frameCount = frameCount + 1
+            
+            -- 1초마다 통계 표시 (60프레임 기준)
+            if frameCount % 60 == 0 then
+                print(string.format("SetOwner: %d, Destroy: %d", setOwnerCount, destroyCount))
+                setOwnerCount = 0
+                destroyCount = 0
+            end
+        end
+        
+        local targetName = kickGrabTargetList[currentTargetIndex]
+        local target = Players:FindFirstChild(targetName)
+        
+        if not target then
+            currentTargetIndex = currentTargetIndex + 1
+            task.wait()
+            continue
+        end
+        
+        local myChar = plr.Character
+        local targetChar = target.Character
+        local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        
+        local targetHrp = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+        local targetBody = targetChar and (targetChar:FindFirstChild("Torso") or targetChar:FindFirstChild("UpperTorso"))
+        local cam = Workspace.CurrentCamera 
+
+        if myHrp and targetHrp and cam then
+            local rOwner = SetNetworkOwner
+            local rDestroy = DestroyGrabLine
+            local rSpawn = SpawnToyRemote
+            
+            local distance = (myHrp.Position - targetHrp.Position).Magnitude
+            if distance > 30 then
+                local ping = plr:GetNetworkPing()
+                local offset = targetHrp.Position + (targetHrp.Velocity * (ping + 0.15))
+                myHrp.CFrame = CFrame.new(offset) * targetHrp.CFrame.Rotation
+                task.wait(0.05)
+            end
+            
+            local detentionPos
+            if KickGrabState.Mode == "위" then 
+                detentionPos = myHrp.CFrame * CFrame.new(0, 18, 0)
+            elseif KickGrabState.Mode == "아래" then 
+                detentionPos = myHrp.CFrame * CFrame.new(0, -10, 0)
+            else 
+                detentionPos = cam.CFrame * CFrame.new(0, 0, -KickGrabState.DetentionDist)
+            end
+            
+            -- ===== 30/30 도배 파트 =====
+            if rOwner and rDestroy then
+                -- SetOwner 30번
+                for i = 1, 30 do
+                    pcall(function()
+                        rOwner:FireServer(targetHrp, detentionPos)
+                        if targetBody then
+                            rOwner:FireServer(targetBody, detentionPos)
+                        end
+                    end)
+                    setOwnerCount = setOwnerCount + 1
+                end
+                
+                -- 위치 고정
+                targetHrp.CFrame = detentionPos
+                targetHrp.AssemblyLinearVelocity = Vector3.zero
+                if targetBody then
+                    targetBody.CFrame = detentionPos
+                    targetBody.AssemblyLinearVelocity = Vector3.zero
+                end
+                
+                -- Destroy 30번
+                for i = 1, 30 do
+                    pcall(function()
+                        rDestroy:FireServer(targetHrp)
+                        if targetBody then
+                            rDestroy:FireServer(targetBody)
+                        end
+                    end)
+                    destroyCount = destroyCount + 1
+                end
+            end
+
+            if KickGrabState.AutoRagdoll then
+                local pallet = GetPallet()
+                if not pallet and (tick() - lastSpawnTime > 3.0) then
+                    lastSpawnTime = tick()
+                    if rSpawn then 
+                        task.spawn(function() 
+                            rSpawn:InvokeServer("PalletLightBrown") 
+                        end) 
+                    end
+                end
+                
+                if pallet ~= currentPalletRef then 
+                    currentPalletRef = pallet 
+                    isPalletOwned = false 
+                end
+
+                if pallet then
+                    if not isPalletOwned then
+                        if CreateGrabLine then CreateGrabLine:FireServer(pallet, pallet.CFrame) end
+                        if ExtendGrabLine then ExtendGrabLine:FireServer(25) end
+                        if rOwner then rOwner:FireServer(pallet, pallet.CFrame) end
+                        isPalletOwned = true
+                        task.wait(0.05)
+                    else
+                        local currentTime = tick()
+                        local timeSinceStrike = currentTime - lastStrikeTime
+                        if timeSinceStrike > 2.0 then
+                            pallet.AssemblyLinearVelocity = Vector3.new(0, 400, 0)
+                            pallet.AssemblyAngularVelocity = Vector3.new(1000, 1000, 1000)
+                            if timeSinceStrike > 2.15 then lastStrikeTime = currentTime end
+                        end
+                        pallet.CFrame = targetHrp.CFrame * CFrame.new(0, 50, 0)
+                    end
+                end
+            end
+            
+            currentTargetIndex = currentTargetIndex + 1
+        end
+        RunService.RenderStepped:Wait()
+    end
+end
